@@ -1,5 +1,5 @@
 /*!
- * Webogram v0.5.0 - messaging web application for MTProto
+ * Webogram v0.5.1 - messaging web application for MTProto
  * https://github.com/zhukov/webogram
  * Copyright (C) 2014 Igor Zhukov <igor.beatle@gmail.com>
  * https://github.com/zhukov/webogram/blob/master/LICENSE
@@ -54,7 +54,7 @@ angular.module('myApp.filters', ['myApp.i18n'])
 
         case 'userStatusBot':
           if (botChatPrivacy) {
-            if (user.pFlags.botNoPrivacy) {
+            if (user.pFlags.bot_chat_history) {
               return _('user_status_bot_noprivacy');
             } else {
               return _('user_status_bot_privacy');

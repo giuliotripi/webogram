@@ -1,5 +1,5 @@
 /*!
- * Webogram v0.5.0 - messaging web application for MTProto
+ * Webogram v0.5.1 - messaging web application for MTProto
  * https://github.com/zhukov/webogram
  * Copyright (C) 2014 Igor Zhukov <igor.beatle@gmail.com>
  * https://github.com/zhukov/webogram/blob/master/LICENSE
@@ -113,16 +113,9 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
       usernames[searchUsername] = userID;
     }
 
-    apiUser.pFlags = {
-      self: (apiUser.flags & (1 << 10)) > 0,
-      contact: (apiUser.flags & (1 << 11)) > 0,
-      mutual: (apiUser.flags & (1 << 12)) > 0,
-      deleted: (apiUser.flags & (1 << 13)) > 0,
-      bot: (apiUser.flags & (1 << 14)) > 0,
-      botNoPrivacy: (apiUser.flags & (1 << 15)) > 0,
-      botNoGroups: (apiUser.flags & (1 << 16)) > 0,
-      verified: (apiUser.flags & (1 << 17)) > 0
-    };
+    if (apiUser.pFlags === undefined) {
+      apiUser.pFlags = {};
+    }
 
     apiUser.sortName = apiUser.pFlags.deleted ? '' : SearchIndexManager.cleanSearchText(apiUser.first_name + ' ' + (apiUser.last_name || ''));
 
@@ -442,8 +435,14 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
     }
   });
 
+  $rootScope.$on('user_auth', function (e, userAuth) {
+    myID = userAuth && userAuth.id || 0;
+  });
+
+
   setInterval(updateUsersStatuses, 60000);
 
+  $rootScope.$on('stateSynchronized', updateUsersStatuses);
 
   return {
     getContacts: getContacts,
@@ -558,6 +557,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
   var chats = {},
       usernames = {},
       channelAccess = {},
+      megagroups = {},
       cachedPhotoLocations = {};
 
   function saveApiChats (apiChats) {
@@ -570,29 +570,16 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
     }
     apiChat.rTitle = RichTextProcessor.wrapRichText(apiChat.title, {noLinks: true, noLinebreaks: true}) || _('chat_title_deleted');
 
-    var flags = apiChat.flags;
-    apiChat.pFlags = {
-      creator: (flags & (1 << 0)) > 0,
-      kicked: (flags & (1 << 1)) > 0,
-      left: (flags & (1 << 2)) > 0
-    };
-
-    if (apiChat._ == 'channel') {
-      angular.extend(apiChat.pFlags, {
-        editor: (apiChat.flags & (1 << 3)) > 0,
-        moderator: (apiChat.flags & (1 << 4)) > 0,
-        broadcast: (apiChat.flags & (1 << 5)) > 0,
-        username: (apiChat.flags & (1 << 6)) > 0,
-        verified: (apiChat.flags & (1 << 7)) > 0
-      });
-    };
-
     var titleWords = SearchIndexManager.cleanSearchText(apiChat.title || '').split(' ');
     var firstWord = titleWords.shift();
     var lastWord = titleWords.pop();
     apiChat.initials = firstWord.charAt(0) + (lastWord ? lastWord.charAt(0) : firstWord.charAt(1));
 
     apiChat.num = (Math.abs(apiChat.id >> 1) % 8) + 1;
+
+    if (apiChat.pFlags === undefined) {
+      apiChat.pFlags = {};
+    }
 
     if (apiChat.username) {
       var searchUsername = SearchIndexManager.cleanUsername(apiChat.username);
@@ -612,7 +599,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
   };
 
   function getChat (id) {
-    return chats[id] || {id: id, deleted: true};
+    return chats[id] || {id: id, deleted: true, access_hash: channelAccess[id]};
   }
 
   function hasRights (id, action) {
@@ -626,10 +613,37 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
         chat.pFlags.left) {
       return false;
     }
-    if (isChannel(id) && action == 'send') {
-      if (!chat.pFlags.creator && !chat.pFlags.editor) {
-        return false;
-      }
+    if (chat.pFlags.creator) {
+      return true;
+    }
+
+    switch (action) {
+      case 'send':
+        if (chat._ == 'channel' &&
+            !chat.pFlags.megagroup &&
+            !chat.pFlags.editor) {
+          return false;
+        }
+        break;
+
+      case 'edit_title':
+      case 'edit_photo':
+      case 'invite':
+        if (chat._ == 'channel') {
+          if (chat.pFlags.megagroup) {
+            if (!chat.pFlags.editor) {
+              return false;
+            }
+          } else {
+            return false;
+          }
+        } else {
+          if (chat.pFlags.admins_enabled &&
+              !chat.pFlags.editor) {
+            return false;
+          }
+        }
+        break;
     }
     return true;
   }
@@ -642,10 +656,25 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
     channelAccess[id] = accessHash;
   }
 
+  function saveIsMegagroup (id) {
+    megagroups[id] = true;
+  }
+
   function isChannel (id) {
     var chat = chats[id];
     if (chat && (chat._ == 'channel' || chat._ == 'channelForbidden') ||
         channelAccess[id]) {
+      return true;
+    }
+    return false;
+  }
+
+  function isMegagroup (id) {
+    if (megagroups[id]) {
+      return true;
+    }
+    var chat = chats[id];
+    if (chat && chat._ == 'channel' && chat.pFlags.megagroup) {
       return true;
     }
     return false;
@@ -686,7 +715,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
   function getChatString (id) {
     var chat = getChat(id);
     if (isChannel(id)) {
-      return 'c' + id + '_' + chat.access_hash;
+      return (isMegagroup(id) ? 's' : 'c') + id + '_' + chat.access_hash;
     }
     return 'g' + id;
   }
@@ -697,10 +726,13 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
 
     if (chatFull.participants && chatFull.participants._ == 'chatParticipants') {
       MtpApiManager.getUserID().then(function (myID) {
-        chatFull.isAdmin = (myID == chatFull.participants.admin_id);
+        var isAdmin = chat.pFlags.creator || chat.pFlags.admins_enabled && chat.pFlags.admin;
         angular.forEach(chatFull.participants.participants, function(participant){
           participant.canLeave = myID == participant.user_id;
-          participant.canKick = !participant.canLeave && (chatFull.isAdmin || myID == participant.inviter_id);
+          participant.canKick = !participant.canLeave && (
+                                  chat.pFlags.creator ||
+                                  participant._ == 'chatParticipant' && (isAdmin || myID == participant.inviter_id)
+                                );
 
           // just for order by last seen
           participant.user = AppUsersManager.getUser(participant.user_id);
@@ -764,8 +796,10 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
     saveApiChat: saveApiChat,
     getChat: getChat,
     isChannel: isChannel,
+    isMegagroup: isMegagroup,
     hasRights: hasRights,
     saveChannelAccess: saveChannelAccess,
+    saveIsMegagroup: saveIsMegagroup,
     getChatInput: getChatInput,
     getChannelInput: getChannelInput,
     getChatPhoto: getChatPhoto,
@@ -790,8 +824,11 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
         access_hash: peerParams[1]
       };
     }
-    else if (firstChar == 'c') {
+    else if (firstChar == 'c' || firstChar == 's') {
       AppChatsManager.saveChannelAccess(peerParams[0], peerParams[1]);
+      if (firstChar == 's') {
+        AppChatsManager.saveIsMegagroup(peerParams[0]);
+      }
       return {
         _: 'inputPeerChannel',
         channel_id: peerParams[0],
@@ -912,6 +949,10 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
     return (peerID < 0) && AppChatsManager.isChannel(-peerID);
   }
 
+  function isMegagroup (peerID) {
+    return (peerID < 0) && AppChatsManager.isMegagroup(-peerID);
+  }
+
   function isBot (peerID) {
     return (peerID > 0) && AppUsersManager.isBot(peerID);
   }
@@ -927,6 +968,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
     getPeerPhoto: getPeerPhoto,
     resolveUsername: resolveUsername,
     isChannel: isChannel,
+    isMegagroup: isMegagroup,
     isBot: isBot
   }
 })
@@ -986,7 +1028,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
   function getPeerBots (peerID) {
     var peerBots = [];
     if (peerID >= 0 && !AppUsersManager.isBot(peerID) ||
-        AppPeersManager.isChannel(peerID)) {
+        (AppPeersManager.isChannel(peerID) && !AppPeersManager.isMegagroup(peerID))) {
       return $q.when(peerBots);
     }
     if (peerID >= 0) {
@@ -1047,9 +1089,17 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
           chatFull.exported_invite._ == 'chatInviteExported') {
         return chatFull.exported_invite.link;
       }
-      return MtpApiManager.invokeApi('messages.exportChatInvite', {
-        chat_id: AppChatsManager.getChatInput(id)
-      }).then(function (exportedInvite) {
+      var promise;
+      if (AppChatsManager.isChannel(id)) {
+        promise = MtpApiManager.invokeApi('channels.exportInvite', {
+          channel: AppChatsManager.getChannelInput(id)
+        });
+      } else {
+        promise = MtpApiManager.invokeApi('messages.exportChatInvite', {
+          chat_id: AppChatsManager.getChatInput(id)
+        });
+      }
+      return promise.then(function (exportedInvite) {
         if (chatsFull[id] !== undefined) {
           chatsFull[id].exported_invite = exportedInvite;
         }
@@ -1063,10 +1113,32 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
       channel: AppChatsManager.getChannelInput(id),
       filter: {_: 'channelParticipantsRecent'},
       offset: 0,
-      limit: 200
+      limit: AppChatsManager.isMegagroup(id) ? 50 : 200
     }).then(function (result) {
       AppUsersManager.saveApiUsers(result.users);
-      return result.participants;
+      var participants = result.participants;
+
+      var chat = AppChatsManager.getChat(id);
+      if (!chat.pFlags.kicked && !chat.pFlags.left) {
+        var myID = AppUsersManager.getSelf().id;
+        var myIndex = false;
+        var myParticipant;
+        for (var i = 0, len = participants.length; i < len; i++) {
+          if (participants[i].user_id == myID) {
+            myIndex = i;
+            break;
+          }
+        }
+        if (myIndex !== false) {
+          myParticipant = participants[i];
+          participants.splice(i, 1);
+        } else {
+          myParticipant = {_: 'channelParticipantSelf', user_id: myID};
+        }
+        participants.unshift(myParticipant);
+      }
+
+      return participants;
     });
   }
 
@@ -1090,10 +1162,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
       }
       NotificationsManager.savePeerSettings(-id, fullChannel.notify_settings);
       var participantsPromise;
-      if ((fullChannel.flags & 8) ||
-          chat.pFlags.creator ||
-          chat.pFlags.editor ||
-          chat.pFlags.moderator) {
+      if (fullChannel.flags & 8) {
         participantsPromise = getChannelParticipants(id).then(function (participants) {
           delete chatFullPromises[id];
           fullChannel.participants = {
@@ -1179,6 +1248,29 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
         }
         break;
 
+    }
+  });
+
+  $rootScope.$on('chat_update', function (e, chatID) {
+    var fullChat = chatsFull[chatID];
+    var chat = AppChatsManager.getChat(chatID);
+    if (!chat.photo || !fullChat) {
+      return;
+    }
+    var emptyPhoto = chat.photo == 'chatPhotoEmpty';
+    if (emptyPhoto != (fullChat.chat_photo._ == 'photoEmpty')) {
+      delete chatsFull[chatID];
+      $rootScope.$broadcast('chat_full_update', chatID);
+      return;
+    }
+    if (emptyPhoto) {
+      return;
+    }
+    var smallUserpic = chat.photo.photo_small;
+    var smallPhotoSize = AppPhotosManager.choosePhotoSize(fullChat.chat_photo, 0, 0);
+    if (!angular.equals(smallUserpic, smallPhotoSize.location)) {
+      delete chatsFull[chatID];
+      $rootScope.$broadcast('chat_full_update', chatID);
     }
   });
 
@@ -1301,6 +1393,11 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
           width: width,
           height: height
         };
+
+    if (options.website && Config.Mobile) {
+      width = 50;
+      height = 50;
+    }
 
     // console.log('chosen photo size', photoID, thumbPhotoSize);
     if (thumbPhotoSize && thumbPhotoSize._ != 'photoSizeEmpty') {
@@ -1851,7 +1948,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
 
     var doc = angular.copy(docs[docID]),
         isGif = doc.mime_type == 'image/gif',
-        isSticker = doc.mime_type.substr(0, 6) == 'image/' && doc.sticker,
+        isSticker = doc.mime_type == 'image/webp' && doc.sticker,
         thumbPhotoSize = doc.thumb,
         width, height;
 
@@ -1896,7 +1993,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
     }
     doc.thumb = thumb;
 
-    doc.withPreview = !Config.Mobile && doc.mime_type.match(/^(image\/)/) ? 1 : 0;
+    doc.withPreview = !Config.Mobile && doc.mime_type.match(/^image\/(gif|png|jpeg|jpg|bmp|tiff)/) ? 1 : 0;
 
     if (isGif && doc.thumb) {
       doc.isSpecial = 'gif';
@@ -2521,6 +2618,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
           message: {
             _: 'message',
             flags: updateMessage.flags,
+            pFlags: updateMessage.pFlags,
             id: updateMessage.id,
             from_id: fromID,
             to_id: AppPeersManager.getOutputPeer(toID),
@@ -2667,7 +2765,8 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
 
       console.log(dT(), 'apply channel diff', channelState.pts);
 
-      if (differenceResult._ == 'updates.channelDifference' && !(differenceResult.flags & 1)) {
+      if (differenceResult._ == 'updates.channelDifference' &&
+          !differenceResult.pFlags['final']) {
         getChannelDifference(channelID);
       } else {
         console.log(dT(), 'finished channel get diff');
@@ -2709,6 +2808,9 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
       case 'updateDeleteChannelMessages':
         channelID = update.channel_id;
         break;
+    }
+    if (channelID && !AppChatsManager.hasChat(channelID)) {
+      return false;
     }
     var curState = channelID ? getChannelState(channelID, update.pts) : updatesState;
 
@@ -2905,7 +3007,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
 
 })
 
-.service('NotificationsManager', function ($rootScope, $window, $interval, $q, _, MtpApiManager, AppPeersManager, IdleManager, Storage, AppRuntimeManager) {
+.service('NotificationsManager', function ($rootScope, $window, $interval, $q, _, MtpApiManager, AppPeersManager, IdleManager, Storage, AppRuntimeManager, FileManager) {
 
   navigator.vibrate = navigator.vibrate || navigator.mozVibrate || navigator.webkitVibrate;
 
@@ -3130,12 +3232,24 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
     // console.log('notify', $rootScope.idle.isIDLE, notificationsUiSupport);
 
     // FFOS Notification blob src bug workaround
-    if (Config.Navigator.ffos) {
-      data.image = 'https://raw.githubusercontent.com/zhukov/webogram/master/app/img/icons/icon60.png';
+    if (Config.Navigator.ffos && !Config.Navigator.ffos2p) {
+      data.image = 'https://telegram.org/img/t_logo.png';
+    }
+    else if (data.image && !angular.isString(data.image)) {
+      if (Config.Navigator.ffos2p) {
+        FileManager.getDataUrl(data.image, 'image/jpeg').then(function (url) {
+          data.image = url;
+          notify(data);
+        });
+        return false;
+      } else {
+        data.image = FileManager.getUrl(data.image, 'image/jpeg');
+      }
     }
     else if (!data.image) {
       data.image = 'img/icons/icon60.png';
     }
+    // console.log('notify image', data.image);
 
     notificationsCount++;
 
@@ -3634,7 +3748,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
             popup = window.open('https://web.telegram.org', '_blank');
           } catch (e) {}
           if (!popup) {
-            location = 'https://web.telegram.org';
+            location.href = 'https://web.telegram.org';
           }
         }, function () {
           Storage.set({https_dismiss: tsNow()});
@@ -3813,9 +3927,7 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
     }
 
     if (matches = url.match(/^msg_url\?url=([^&]+)(?:&text=(.*))?$/)) {
-      PeersSelectService.selectPeer({
-        confirm_type: 'SHARE_URL'
-      }).then(function (toPeerString) {
+      PeersSelectService.selectPeer().then(function (toPeerString) {
         var url = decodeURIComponent(matches[1]);
         var text = matches[2] ? decodeURIComponent(matches[2]) : '';
         $rootScope.$broadcast('history_focus', {
@@ -3875,6 +3987,62 @@ angular.module('myApp.services', ['myApp.i18n', 'izhukov.utils'])
       try {
         navigator.registerProtocolHandler('web+tg', '#im?tgaddr=%s', 'Telegram Web');
       } catch (e) {}
+    }
+
+    if (window.navigator.mozSetMessageHandler) {
+      console.log(dT(), 'Set activity message handler');
+      window.navigator.mozSetMessageHandler('activity', function(activityRequest) {
+        var source = activityRequest.source;
+        console.log(dT(), 'Received activity', source.name, source.data);
+
+        if (source.name == 'share' && source.data.url) {
+          var tgUrl = 'msg_url?url=' + encodeURIComponent(source.data.url);
+          handleTgProtoAddr(tgUrl);
+        }
+        else if (source.name == 'view' && source.data.url) {
+          var matches = source.data.url.match(tgAddrRegExp);
+          if (matches) {
+            handleTgProtoAddr(matches[3]);
+          }
+        }
+        else if (source.name == 'webrtc-call' && source.data.contact) {
+          var contact = source.data.contact;
+          var phones = [];
+          if (contact.tel != undefined) {
+            for (var i = 0; i < contact.tel.length; i++) {
+              phones.push(contact.tel[i].value);
+            }
+          }
+          var firstName = (contact.givenName || []).join(' ');
+          var lastName = (contact.familyName || []).join(' ');
+
+          if (phones.length) {
+            AppUsersManager.importContact(phones[0], firstName, lastName).then(function (foundUserID) {
+              if (foundUserID) {
+                var peerString = AppPeersManager.getPeerString(foundUserID);
+                $rootScope.$broadcast('history_focus', {peerString: peerString});
+              } else {
+                ErrorService.show({
+                  error: {code: 404, type: 'USER_NOT_USING_TELEGRAM'}
+                });
+              }
+            });
+          }
+        }
+        else if (source.name === 'share' && source.data.blobs && source.data.blobs.length > 0) {
+          PeersSelectService.selectPeers({confirm_type: 'EXT_SHARE_PEER'}).then(function (peerStrings) {
+            angular.forEach(peerStrings, function (peerString) {
+              var peerID = AppPeersManager.getPeerID(peerString);
+              angular.forEach(source.data.blobs, function (blob) {
+                AppMessagesManager.sendFile(peerID, blob, {isMedia: true});
+              });
+            })
+            if (peerStrings.length == 1) {
+              $rootScope.$broadcast('history_focus', {peerString: peerStrings[0]});
+            }
+          });
+        }
+      });
     }
 
     $(document).on('click', function (event) {

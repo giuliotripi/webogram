@@ -1,5 +1,5 @@
 /*!
- * Webogram v0.5.0 - messaging web application for MTProto
+ * Webogram v0.5.1 - messaging web application for MTProto
  * https://github.com/zhukov/webogram
  * Copyright (C) 2014 Igor Zhukov <igor.beatle@gmail.com>
  * https://github.com/zhukov/webogram/blob/master/LICENSE
@@ -116,8 +116,8 @@ angular.module('myApp.directives', ['myApp.filters'])
       });
 
       var deregisterUnreadAfter;
-      if (!$scope.historyMessage.out &&
-          ($scope.historyMessage.unread || $scope.historyMessage.unreadAfter)) {
+      if (!$scope.historyMessage.pFlags.out &&
+          ($scope.historyMessage.pFlags.unread || $scope.historyMessage.unreadAfter)) {
         var applyUnreadAfter = function () {
           if ($scope.peerHistory.peerID != $scope.historyPeer.id) {
             return;
@@ -141,10 +141,10 @@ angular.module('myApp.directives', ['myApp.filters'])
         applyUnreadAfter();
         deregisterUnreadAfter = $scope.$on('messages_unread_after', applyUnreadAfter);
       }
-      if ($scope.historyMessage.unread && $scope.historyMessage.out) {
+      if ($scope.historyMessage.pFlags.unread && $scope.historyMessage.pFlags.out) {
         element.addClass(unreadClass);
         var deregisterUnread = $scope.$on('messages_read', function () {
-          if (!$scope.historyMessage.unread) {
+          if (!$scope.historyMessage.pFlags.unread) {
             element.removeClass(unreadClass);
             deregisterUnread();
             if (deregisterUnreadAfter && !unreadAfter) {
@@ -553,7 +553,7 @@ angular.module('myApp.directives', ['myApp.filters'])
         onContentLoaded(function () {
           scroller.updateHeight();
           scroller.scrollTo(0);
-          $scope.$emit('ui_panel_update', {blur: data.enabled});
+          $scope.$emit('ui_panel_update', {blur: data && data.enabled});
         })
       });
       onContentLoaded(function () {
@@ -573,6 +573,7 @@ angular.module('myApp.directives', ['myApp.filters'])
       templateUrl: templateUrl('message_attach_photo'),
       link: function ($scope, element, attrs) {
         $scope.openPhoto = AppPhotosManager.openPhoto;
+        $scope.preloadPhoto = AppPhotosManager.preloadPhoto;
       }
     };
   })
@@ -758,7 +759,7 @@ angular.module('myApp.directives', ['myApp.filters'])
           return cancelEvent(e);
         }
 
-        if (searchFocused && e.keyCode == 13) { // Enter
+        if (searchFocused && e.keyCode == 13 && !Config.Navigator.mobile) { // Enter
           var currentSelected = $(scrollableWrap).find('.im_dialog_selected')[0] || $(scrollableWrap).find('.im_dialog_wrap a')[0];
           if (currentSelected) {
             $(currentSelected).trigger('mousedown');
@@ -1562,14 +1563,14 @@ angular.module('myApp.directives', ['myApp.filters'])
       $(submitBtn).on('mousedown touchstart', onMessageSubmit);
 
       function onMessageSubmit (e) {
-        $scope.$apply(function () {
+        $timeout(function () {
           updateValue();
           $scope.draftMessage.send();
           composer.resetTyping();
           if (composerEmojiPanel) {
             composerEmojiPanel.update();
           }
-        });
+        }, Config.Navigator.touch ? 100 : 0);
         return cancelEvent(e);
       }
 
@@ -1644,13 +1645,10 @@ angular.module('myApp.directives', ['myApp.filters'])
         composer.onMentionsUpdated();
       });
 
-      var sendAwaiting = false;
       $scope.$on('ui_message_before_send', function () {
-        sendAwaiting = true;
         updateValue();
       });
       $scope.$on('ui_message_send', function () {
-        sendAwaiting = false;
         if (!Config.Navigator.touch) {
           focusField();
         }
@@ -2518,13 +2516,20 @@ angular.module('myApp.directives', ['myApp.filters'])
 
   })
 
-  .directive('myUserStatus', function ($filter, AppUsersManager) {
+  .directive('myUserStatus', function ($filter, $rootScope, AppUsersManager) {
 
     var statusFilter = $filter('userStatus'),
         ind = 0,
         statuses = {};
 
     setInterval(updateAll, 90000);
+
+    $rootScope.$on('stateSynchronized', function () {
+      setTimeout(function () {
+        updateAll();
+      }, 100);
+    });
+
 
     return {
       link: link
@@ -2544,6 +2549,7 @@ angular.module('myApp.directives', ['myApp.filters'])
             element
               .html(statusFilter(user, attrs.botChatPrivacy))
               .toggleClass('status_online', user.status && user.status._ == 'userStatusOnline' || false);
+            // console.log(dT(), 'update status', element[0], user.status && user.status, tsNow(true), element.html());
           };
 
       $scope.$watch(attrs.myUserStatus, function (newUserID) {
@@ -2615,18 +2621,20 @@ angular.module('myApp.directives', ['myApp.filters'])
       var update = function () {
         var html = allPluralize(participantsCount);
         var onlineCount = 0;
-        var wasMe = false;
-        angular.forEach(participants, function (t, userID) {
-          var user = AppUsersManager.getUser(userID);
-          if (user.status && user.status._ == 'userStatusOnline') {
-            if (user.id == myID) {
-              wasMe = true;
+        if (!AppChatsManager.isChannel(chatID)) {
+          var wasMe = false;
+          angular.forEach(participants, function (t, userID) {
+            var user = AppUsersManager.getUser(userID);
+            if (user.status && user.status._ == 'userStatusOnline') {
+              if (user.id == myID) {
+                wasMe = true;
+              }
+              onlineCount++;
             }
-            onlineCount++;
+          });
+          if (onlineCount > 1 || onlineCount == 1 && !wasMe) {
+            html = _('group_modal_participants', {total: html, online: onlinePluralize(onlineCount)});
           }
-        });
-        if (onlineCount > 1 || onlineCount == 1 && !wasMe) {
-          html = _('group_modal_participants', {total: html, online: onlinePluralize(onlineCount)});
         }
         if (!onlineCount && !participantsCount) {
           html = '';
@@ -2946,8 +2954,8 @@ angular.module('myApp.directives', ['myApp.filters'])
                 $scope.mediaPlayer.player.play();
 
                 if ($scope.message &&
-                    !$scope.message.out &&
-                    $scope.message.media_unread) {
+                    !$scope.message.pFlags.out &&
+                    $scope.message.pFlags.media_unread) {
                   AppMessagesManager.readMessages([$scope.message.mid]);
                 }
               }, 300);

@@ -1,5 +1,5 @@
 /*!
- * Webogram v0.5.0 - messaging web application for MTProto
+ * Webogram v0.5.1 - messaging web application for MTProto
  * https://github.com/zhukov/webogram
  * Copyright (C) 2014 Igor Zhukov <igor.beatle@gmail.com>
  * https://github.com/zhukov/webogram/blob/master/LICENSE
@@ -205,7 +205,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         var authKeyStarted = tsNow();
         MtpApiManager.invokeApi('auth.sendCode', {
           phone_number: $scope.credentials.phone_full,
-          // sms_type: 5,
+          sms_type: 5,
           api_id: Config.App.id,
           api_hash: Config.App.hash,
           lang_code: navigator.language || 'en'
@@ -321,6 +321,10 @@ angular.module('myApp.controllers', ['myApp.i18n'])
             delete $scope.credentials.phone_code_valid;
             error.handled = true;
             break;
+          case 'PHONE_CODE_EXPIRED':
+            $scope.editPhone();
+            error.handled = true;
+            break;
         }
       });
 
@@ -408,7 +412,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     LayoutSwitchService.start();
   })
 
-  .controller('AppIMController', function ($q, qSync, $scope, $location, $routeParams, $modal, $rootScope, $modalStack, MtpApiManager, AppUsersManager, AppChatsManager, AppPeersManager, ContactsSelectService, ChangelogNotifyService, ErrorService, AppRuntimeManager, HttpsMigrateService, LayoutSwitchService, LocationParamsService, AppStickersManager) {
+  .controller('AppIMController', function ($q, qSync, $scope, $location, $routeParams, $modal, $rootScope, $modalStack, MtpApiManager, AppUsersManager, AppChatsManager, AppMessagesManager, AppPeersManager, ContactsSelectService, ChangelogNotifyService, ErrorService, AppRuntimeManager, HttpsMigrateService, LayoutSwitchService, LocationParamsService, AppStickersManager) {
 
     $scope.$on('$routeUpdate', updateCurDialog);
 
@@ -541,6 +545,11 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       }
       else if ($scope.search.query) {
         $scope.searchClear();
+      }
+      var peerID = AppPeersManager.getPeerID(peerString);
+      var converted = AppMessagesManager.convertMigratedPeer(peerID);
+      if (converted) {
+        params.peerString = AppPeersManager.getPeerString(converted);
       }
       $rootScope.$broadcast('history_focus', params);
     };
@@ -745,7 +754,9 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         case 'updateUserTyping':
         case 'updateChatUserTyping':
           if (!AppUsersManager.hasUser(update.user_id)) {
-            if (update.chat_id) {
+            if (update.chat_id &&
+                AppChatsManager.hasChat(update.chat_id) &&
+                !AppChatsManager.isChannel(update.chat_id)) {
               AppProfileManager.getChatFull(update.chat_id);
             }
             return;
@@ -820,7 +831,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       if (searchMessages) {
         searchTimeoutPromise = (force || maxID) ? $q.when() : $timeout(angular.noop, 500);
         return searchTimeoutPromise.then(function () {
-          return AppMessagesManager.getSearch({_: 'inputPeerEmpty'}, $scope.search.query, {_: 'inputMessagesFilterEmpty'}, maxID).then(function (result) {
+          return AppMessagesManager.getSearch(false, $scope.search.query, {_: 'inputMessagesFilterEmpty'}, maxID).then(function (result) {
             if (curJump != jump) {
               return $q.reject();
             }
@@ -1105,8 +1116,9 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
       $rootScope.selectedPeerID = peerID;
       $scope.curDialog.peerID = peerID;
-      $scope.curDialog.inputPeer = AppPeersManager.getInputPeer(newPeer);
       $scope.historyFilter.mediaType = false;
+
+      AppPeersManager.getInputPeer(newPeer);
 
       updateBotActions();
       selectedCancel(true);
@@ -1197,6 +1209,9 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         $scope.$broadcast('ui_peer_change');
         $scope.$broadcast('ui_history_change');
         safeReplaceObject($scope.state, {loaded: true, empty: !peerHistory.messages.length});
+
+        updateBotActions();
+        updateChannelActions();
       }
     }
 
@@ -1237,7 +1252,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
           AppPeersManager.isChannel(peerID) &&
           (channel = AppChatsManager.getChat(-peerID))) {
 
-        var canSend = channel.pFlags.creator || channel.pFlags.editor;
+        var canSend = AppChatsManager.hasRights(-peerID, 'send');
         if (!canSend) {
           if (channel.pFlags.left) {
             $scope.historyState.channelActions = 'join';
@@ -1303,7 +1318,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
           curLessJump = ++lessJump,
           limit = 0,
           backLimit = 20;
-      AppMessagesManager.getHistory($scope.curDialog.inputPeer, minID, limit, backLimit).then(function (historyResult) {
+      AppMessagesManager.getHistory($scope.curDialog.peerID, minID, limit, backLimit).then(function (historyResult) {
         lessActive = false;
         if (curJump != jump || curLessJump != lessJump) return;
 
@@ -1352,8 +1367,8 @@ angular.module('myApp.controllers', ['myApp.i18n'])
           inputMediaFilter = $scope.historyFilter.mediaType && {_: inputMediaFilters[$scope.historyFilter.mediaType]},
           limit = Config.Mobile ? 20 : 0,
           getMessagesPromise = inputMediaFilter
-        ? AppMessagesManager.getSearch($scope.curDialog.inputPeer, '', inputMediaFilter, maxID, limit)
-        : AppMessagesManager.getHistory($scope.curDialog.inputPeer, maxID, limit);
+        ? AppMessagesManager.getSearch($scope.curDialog.peerID, '', inputMediaFilter, maxID, limit)
+        : AppMessagesManager.getHistory($scope.curDialog.peerID, maxID, limit);
 
       getMessagesPromise.then(function (historyResult) {
         moreActive = false;
@@ -1419,8 +1434,8 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       var curJump = ++jump,
           inputMediaFilter = $scope.historyFilter.mediaType && {_: inputMediaFilters[$scope.historyFilter.mediaType]},
           getMessagesPromise = inputMediaFilter
-        ? AppMessagesManager.getSearch($scope.curDialog.inputPeer, '', inputMediaFilter, maxID)
-        : AppMessagesManager.getHistory($scope.curDialog.inputPeer, maxID, limit, backLimit, prerenderedLen);
+        ? AppMessagesManager.getSearch($scope.curDialog.peerID, '', inputMediaFilter, maxID)
+        : AppMessagesManager.getHistory($scope.curDialog.peerID, maxID, limit, backLimit, prerenderedLen);
 
 
       $scope.state.mayBeHasMore = true;
@@ -1448,7 +1463,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         angular.forEach(historyResult.history, function (id) {
           var message = AppMessagesManager.wrapForHistory(id);
           if ($scope.historyState.skipped) {
-            delete message.unread;
+            delete message.pFlags.unread;
           }
           if (historyResult.unreadOffset) {
             message.unreadAfter = true;
@@ -1485,7 +1500,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
           }, 2800);
         }
 
-        AppMessagesManager.readHistory($scope.curDialog.inputPeer);
+        AppMessagesManager.readHistory($scope.curDialog.peerID);
 
         updateBotActions();
         updateChannelActions();
@@ -1660,7 +1675,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
     function selectedFlush () {
       ErrorService.confirm({type: 'HISTORY_FLUSH'}).then(function () {
-        AppMessagesManager.flushHistory($scope.curDialog.inputPeer).then(function () {
+        AppMessagesManager.flushHistory($scope.curDialog.peerID).then(function () {
           selectedCancel();
         });
       })
@@ -1787,6 +1802,14 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       historiesQueuePop(updPeerID);
     });
 
+    $scope.$on('dialog_migrate', function (e, data) {
+      if (data.migrateFrom == $scope.curDialog.peerID) {
+        var peerString = AppPeersManager.getPeerString(data.migrateTo);
+        $rootScope.$broadcast('history_focus', {peerString: peerString});
+      }
+      historiesQueuePop(data.migrateFrom);
+    });
+
     $scope.$on('notify_settings', function (e, data) {
       if (data.peerID == $scope.curDialog.peerID) {
         updateChannelActions();
@@ -1835,7 +1858,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         $scope.historyState.typing.splice(0, $scope.historyState.typing.length);
         $scope.$broadcast('ui_history_append_new', {
           my: addedMessage.my,
-          idleScroll: unreadAfterIdle && !historyMessage.out && $rootScope.idle.isIDLE
+          idleScroll: unreadAfterIdle && !historyMessage.pFlags.out && $rootScope.idle.isIDLE
         });
         if (addedMessage.my && $scope.historyUnreadAfter) {
           delete $scope.historyUnreadAfter;
@@ -1844,9 +1867,9 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
         // console.log('append check', $rootScope.idle.isIDLE, addedMessage.peerID, $scope.curDialog.peerID, historyMessage, history.messages[history.messages.length - 2]);
         if ($rootScope.idle.isIDLE) {
-          if (historyMessage.unread &&
-              !historyMessage.out &&
-              !(history.messages[history.messages.length - 2] || {}).unread) {
+          if (historyMessage.pFlags.unread &&
+              !historyMessage.pFlags.out &&
+              !(history.messages[history.messages.length - 2] || {}).pFlags.unread) {
 
             $scope.historyUnreadAfter = historyMessage.mid;
             unreadAfterIdle = true;
@@ -1854,7 +1877,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
           }
         } else {
           $timeout(function () {
-            AppMessagesManager.readHistory($scope.curDialog.inputPeer);
+            AppMessagesManager.readHistory($scope.curDialog.peerID);
           });
         }
 
@@ -1906,7 +1929,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         var hasOut = false;
         var unreadAfterNew = false;
         var historyMessage = history.messages[history.messages.length - 1];
-        var lastIsRead = !historyMessage || !historyMessage.unread;
+        var lastIsRead = !historyMessage || !historyMessage.pFlags.unread;
         for (i = 0; i < len; i++) {
           messageID = msgs[i];
           if (messageID < maxID ||
@@ -1917,15 +1940,15 @@ angular.module('myApp.controllers', ['myApp.i18n'])
           history.messages.push(historyMessage);
           history.ids.push(messageID);
           if (!unreadAfterNew && isIDLE) {
-            if (historyMessage.unread &&
-                !historyMessage.out &&
+            if (historyMessage.pFlags.unread &&
+                !historyMessage.pFlags.out &&
                 lastIsRead) {
               unreadAfterNew = messageID;
             } else {
-              lastIsRead = !historyMessage.unread;
+              lastIsRead = !historyMessage.pFlags.unread;
             }
           }
-          if (!hasOut && historyMessage.out) {
+          if (!hasOut && historyMessage.pFlags.out) {
             hasOut = true;
           }
         }
@@ -1951,7 +1974,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
             }
           } else {
             $timeout(function () {
-              AppMessagesManager.readHistory($scope.curDialog.inputPeer);
+              AppMessagesManager.readHistory($scope.curDialog.peerID);
             });
           }
 
@@ -2039,7 +2062,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
     $rootScope.$watch('idle.isIDLE', function (newVal) {
       if (!newVal && $scope.curDialog && $scope.curDialog.peerID && !$scope.historyFilter.mediaType && !$scope.historyState.skipped) {
-        AppMessagesManager.readHistory($scope.curDialog.inputPeer);
+        AppMessagesManager.readHistory($scope.curDialog.peerID);
       }
       if (!newVal) {
         unreadAfterIdle = false;
@@ -2172,7 +2195,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
           return;
         }
 
-        var needMentions = peerBots.length > 1;
+        var needMentions = peerID < 0;
         var commandsList = [];
         var commandsIndex = SearchIndexManager.createIndex();
 
@@ -2213,7 +2236,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       // console.log(dT(), 'reset draft', $scope.curDialog.peer, forceDraft);
       if (forceDraft) {
         if (forceDraft == $scope.curDialog.peer) {
-          $scope.draftMessage.isBroadcast = AppPeersManager.isChannel($scope.curDialog.peerID);
+          $scope.draftMessage.isBroadcast = AppPeersManager.isChannel($scope.curDialog.peerID) && !AppPeersManager.isMegagroup($scope.curDialog.peerID);
           $scope.$broadcast('ui_peer_draft');
           return;
         } else {
@@ -2227,7 +2250,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         Storage.get('draft' + $scope.curDialog.peerID).then(function (draftText) {
           // console.log('Restore draft', 'draft' + $scope.curDialog.peerID, draftText);
           $scope.draftMessage.text = draftText || '';
-          $scope.draftMessage.isBroadcast = AppPeersManager.isChannel($scope.curDialog.peerID);
+          $scope.draftMessage.isBroadcast = AppPeersManager.isChannel($scope.curDialog.peerID) && !AppPeersManager.isMegagroup($scope.curDialog.peerID);
           // console.log('send broadcast', $scope.draftMessage);
           $scope.$broadcast('ui_peer_draft');
         });
@@ -2246,7 +2269,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
       if (attachment._ == 'share_url') {
         var url = attachment.url;
-        var text = attachment.text || '';
+        var text = attachment.text || ' ';
         forceDraft = $scope.curDialog.peer;
 
         $timeout(function () {
@@ -2264,6 +2287,11 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         forceDraft = $scope.curDialog.peer;
         $scope.draftMessage.fwdMessages = attachment.id;
         $scope.$broadcast('ui_peer_reply');
+        var peerID = AppPeersManager.getPeerID($scope.curDialog.peer);
+        Storage.get('draft' + peerID).then(function (draftText) {
+          $scope.draftMessage.text = draftText || '';
+          $scope.$broadcast('ui_peer_draft');
+        });
       }
     }
 
@@ -2364,7 +2392,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
       if (newVal && newVal.length) {
         if (!$scope.historyFilter.mediaType && !$scope.historyState.skipped) {
-          AppMessagesManager.readHistory($scope.curDialog.inputPeer);
+          AppMessagesManager.readHistory($scope.curDialog.peerID);
         }
 
         var backupDraftObj = {};
@@ -2378,11 +2406,12 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     }
 
     function onTyping () {
-      if ($scope.curDialog.inputPeer._ == 'inputPeerChannel') {
+      if (AppPeersManager.isChannel($scope.curDialog.peerID) &&
+          !AppPeersManager.isMegagroup($scope.curDialog.peerID)) {
         return false;
       }
       MtpApiManager.invokeApi('messages.setTyping', {
-        peer: $scope.curDialog.inputPeer,
+        peer: AppPeersManager.getInputPeerByID($scope.curDialog.peerID),
         action: {_: 'sendMessageTypingAction'}
       });
     }
@@ -2606,7 +2635,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       return;
     }
 
-    AppMessagesManager.getSearch(inputPeer, inputQuery, inputFilter, 0, 1000).then(function (searchCachedResult) {
+    AppMessagesManager.getSearch(peerID, inputQuery, inputFilter, 0, 1000).then(function (searchCachedResult) {
       if (searchCachedResult.history.indexOf($scope.messageID) >= 0) {
         list = searchCachedResult.history;
         maxID = list[list.length - 1];
@@ -2658,7 +2687,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     function loadMore () {
       if (loadingPromise) return loadingPromise;
 
-      return loadingPromise = AppMessagesManager.getSearch(inputPeer, inputQuery, inputFilter, maxID).then(function (searchResult) {
+      return loadingPromise = AppMessagesManager.getSearch(peerID, inputQuery, inputFilter, maxID).then(function (searchResult) {
         if (searchResult.history.length) {
           maxID = searchResult.history[searchResult.history.length - 1];
           list = list.concat(searchResult.history);
@@ -3072,7 +3101,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
     $scope.flushHistory = function () {
       ErrorService.confirm({type: 'HISTORY_FLUSH'}).then(function () {
-        AppMessagesManager.flushHistory(AppPeersManager.getInputPeerByID($scope.userID)).then(function () {
+        AppMessagesManager.flushHistory($scope.userID).then(function () {
           $scope.goToHistory();
         });
       });
@@ -3153,9 +3182,20 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     $scope.chatFull = AppChatsManager.wrapForFull($scope.chatID, {});
     $scope.settings = {notifications: true};
 
+    $scope.maxParticipants = 200;
+
     AppProfileManager.getChatFull($scope.chatID).then(function (chatFull) {
       $scope.chatFull = AppChatsManager.wrapForFull($scope.chatID, chatFull);
       $scope.$broadcast('ui_height');
+
+      $scope.canMigrate = $scope.chatFull &&
+                          $scope.chatFull.participants &&
+                          $scope.chatFull.participants.participants &&
+                          $scope.chatFull.participants.participants.length >= 200;
+
+      if (Config.Modes.test || Config.Modes.debug) {
+        $scope.canMigrate = true;
+      }
 
       NotificationsManager.savePeerSettings(-$scope.chatID, chatFull.notify_settings);
 
@@ -3221,6 +3261,14 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       });
     };
 
+    $scope.migrateToSuperGroup = function () {
+      ErrorService.confirm({type: 'SUPERGROUP_MIGRATE'}).then(function () {
+        MtpApiManager.invokeApi('messages.migrateChat', {
+          chat_id: AppChatsManager.getChatInput($scope.chatID)
+        }).then(onChatUpdated);
+      });
+    }
+
     $scope.kickFromGroup = function (userID) {
       MtpApiManager.invokeApi('messages.deleteChatUser', {
         chat_id: AppChatsManager.getChatInput($scope.chatID),
@@ -3232,7 +3280,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
     $scope.flushHistory = function () {
       ErrorService.confirm({type: 'HISTORY_FLUSH'}).then(function () {
-        AppMessagesManager.flushHistory(AppPeersManager.getInputPeerByID(-$scope.chatID)).then(function () {
+        AppMessagesManager.flushHistory(-$scope.chatID).then(function () {
           $rootScope.$broadcast('history_focus', {peerString: $scope.chatFull.peerString});
         });
       });
@@ -3296,12 +3344,17 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       });
     }
 
+    $scope.hasRights = function (action) {
+      return AppChatsManager.hasRights($scope.chatID, action);
+    }
+
   })
 
   .controller('ChannelModalController', function ($scope, $timeout, $rootScope, $modal, AppUsersManager, AppChatsManager, AppProfileManager, AppPhotosManager, MtpApiManager, MtpApiFileManager, NotificationsManager, AppMessagesManager, AppPeersManager, ApiUpdatesManager, ContactsSelectService, ErrorService) {
 
     $scope.chatFull = AppChatsManager.wrapForFull($scope.chatID, {});
     $scope.settings = {notifications: true};
+    $scope.isMegagroup = AppChatsManager.isMegagroup($scope.chatID);
 
     AppProfileManager.getChannelFull($scope.chatID, true).then(function (chatFull) {
       $scope.chatFull = AppChatsManager.wrapForFull($scope.chatID, chatFull);
@@ -3326,6 +3379,15 @@ angular.module('myApp.controllers', ['myApp.i18n'])
           });
         });
       });
+
+      if ($scope.chatFull.chat &&
+          $scope.chatFull.chat.pFlags.creator &&
+          $scope.chatFull.exported_invite &&
+          $scope.chatFull.exported_invite._ == 'chatInviteEmpty') {
+        AppProfileManager.getChatInviteLink($scope.chatID, true).then(function (link) {
+          $scope.chatFull.exported_invite = {_: 'chatInviteExported', link: link};
+        });
+      }
     });
 
 
@@ -3341,7 +3403,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     };
 
     $scope.deleteChannel = function () {
-      return ErrorService.confirm({type: 'CHANNEL_DELETE'}).then(function () {
+      return ErrorService.confirm({type: $scope.isMegagroup ? 'MEGAGROUP_DELETE' : 'CHANNEL_DELETE'}).then(function () {
         MtpApiManager.invokeApi('channels.deleteChannel', {
           channel: AppChatsManager.getChannelInput($scope.chatID)
         }).then(onChatUpdated);
@@ -3459,7 +3521,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
       scope.chatID = $scope.chatID;
 
       $modal.open({
-        templateUrl: templateUrl('channel_edit_modal'),
+        templateUrl: templateUrl($scope.isMegagroup ? 'megagroup_edit_modal' : 'channel_edit_modal'),
         controller: 'ChannelEditModalController',
         scope: scope,
         windowClass: 'md_simple_modal_window mobile_modal'
@@ -3469,6 +3531,10 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     $scope.goToHistory = function () {
       $rootScope.$broadcast('history_focus', {peerString: $scope.chatFull.peerString});
     };
+
+    $scope.hasRights = function (action) {
+      return AppChatsManager.hasRights($scope.chatID, action);
+    }
 
   })
 
@@ -4358,6 +4424,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
         promises.push(editAbout());
       }
 
+      $scope.channel.updating = true;
       return $q.all(promises).then(function () {
         var peerString = AppChatsManager.getChatString($scope.chatID);
         $rootScope.$broadcast('history_focus', {peerString: peerString});
@@ -4388,6 +4455,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
     $scope.exportedInvite = {link: _('group_invite_link_loading_raw')};
 
     var isChannel = AppChatsManager.isChannel($scope.chatID);
+    var isMegagroup = AppChatsManager.isMegagroup($scope.chatID);
 
     function selectLink () {
       $timeout(function () {
@@ -4416,7 +4484,7 @@ angular.module('myApp.controllers', ['myApp.i18n'])
 
     $scope.revokeLink = function () {
       ErrorService.confirm({
-        type: isChannel ? 'REVOKE_CHANNEL_INVITE_LINK' : 'REVOKE_GROUP_INVITE_LINK'
+        type: isChannel && !isMegagroup ? 'REVOKE_CHANNEL_INVITE_LINK' : 'REVOKE_GROUP_INVITE_LINK'
       }).then(function () {
         updateLink(true);
       })
